@@ -22,10 +22,13 @@
 
 """Python Module Reloader"""
 
-import copy
-import imp
 import sys
-import types
+import copy
+import inspect
+import importlib
+import traceback
+import KBEngine
+from KBEDebug import *
 
 # Python 3 has builtins.__import__, but
 # Python 2 has __builtin__.__import__
@@ -44,17 +47,12 @@ _blacklist = None
 _dependencies = dict()
 _parent = None
 
-# Jython doesn't have imp.reload().
-if not hasattr(imp, 'reload'):
-    imp.reload = reload  # noqa
-
 # PEP 328 changed the default level to 0 in Python 3.3.
 _default_level = -1 if sys.version_info < (3, 3) else 0
 
 
 def enable(blacklist=None):
     """Enable global module dependency tracking.
-
     A blacklist can be specified to exclude specific modules (and their import
     hierachies) from the reloading process.  The blacklist can be any iterable
     listing the fully-qualified names of modules that should be ignored.  Note
@@ -78,7 +76,7 @@ def disable():
 
 def get_dependencies(m):
     """Get the dependency list for the given imported module."""
-    name = m.__name__ if isinstance(m, types.ModuleType) else m
+    name = inspect.ismodule(m) and m.__name__ or m
     return _dependencies.get(name, None)
 
 
@@ -111,7 +109,7 @@ def _reload(m, visited):
     # we recursively call ourself to perform the nested reloads.
     deps = _dependencies.get(name, None)
     if deps is not None:
-        for dep in reversed(deps):
+        for dep in deps:
             if dep not in visited:
                 _reload(dep, visited)
 
@@ -135,10 +133,10 @@ def _reload(m, visited):
     callback = getattr(m, '__reload__', None)
     if callback is not None:
         d = _deepcopy_module_dict(m)
-        imp.reload(m)
+        importlib.reload(m)
         callback(d)
     else:
-        imp.reload(m)
+        importlib.reload(m)
 
     # Reset our parent pointer now that the reloading operation is complete.
     _parent = None
@@ -146,12 +144,30 @@ def _reload(m, visited):
 
 def reload(m):
     """Reload an existing module.
-
     Any known dependencies of the module will also be reloaded.
-
     If a module has a __reload__(d) function, it will be called with a copy of
     the original module's dictionary after the module is reloaded."""
-    _reload(m, set())
+    if not inspect.ismodule(m):
+        _m = sys.modules.get(m)
+        if _m is None:
+            ERROR_MSG("unknown module: %s" % m)
+            return
+        m = _m
+    
+    try:
+        _reload(m, set())
+    except Exception as e:
+        ERROR_MSG("reload failed: %s" % e)
+        traceback.print_exc()
+        return
+    try:
+        KBEngine.reloadScript()
+    except Exception as e:
+        ERROR_MSG("reload failed: %s" % e)
+        traceback.print_exc()
+        return
+
+    INFO_MSG("reload success.")
 
 
 def _import(name, globals=None, locals=None, fromlist=None,
@@ -165,6 +181,10 @@ def _import(name, globals=None, locals=None, fromlist=None,
 
     # Perform the actual import work using the base import function.
     base = _baseimport(name, globals, locals, fromlist, level)
+    
+    if base is not None and base.__name__ != name  and _dependencies.get(name):
+        _dependencies[base.__name__] = _dependencies.get(name)
+        del _dependencies[name]
 
     if base is not None and parent is not None:
         m = base
